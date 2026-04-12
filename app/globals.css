@@ -1,26 +1,42 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+@theme {
+  /* الربط مع خطوط Next.js */
+  --font-headline: var(--font-inter);
+  --font-label: var(--font-space-grotesk);
+
+  /* لوحة الألوان الخاصة بـ PortValue */
+  --color-background: #0e0e0f;
+  --color-on-background: #e7e5e8;
+  --color-on-surface: #e7e5e8;
+  --color-on-surface-variant: #acaaae;
+  --color-primary: #c4c7ca;
+  --color-tertiary: #8ff5ff;
+  --color-outline-variant: #48484b;
+  --color-surface-container-lowest: #000000;
+  --color-surface-container-high: #1f1f22;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+/* تأثيرات الخلفية والزجاج */
+@utility ai-grid {
+  background-size: 40px 40px;
+  background-image: 
+    linear-gradient(to right, rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+@utility ethereal-glow {
+  background: radial-gradient(circle at 50% -20%, rgba(143, 245, 255, 0.15) 0%, transparent 70%);
+}
+
+@utility glass-card {
+  background: rgba(37, 38, 40, 0.4);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  box-shadow: inset 0 1px 0 0 rgba(196, 199, 202, 0.15);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--color-background);
+  color: var(--color-on-background);
 }

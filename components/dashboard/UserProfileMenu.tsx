@@ -3,6 +3,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { UserCircle, Settings, LogOut, User } from 'lucide-react';
 import { authClient } from '@/lib/auth-client';
 import { useRouter } from 'next/navigation';
+import Image from 'next/image';
 
 export const UserProfileMenu = () => {
   const [isOpen, setIsOpen] = useState(false);
@@ -50,7 +51,7 @@ export const UserProfileMenu = () => {
           <div className="px-4 py-4 border-b border-white/5 flex items-center gap-3 bg-black/40">
             <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-cyan-500/20 to-blue-500/20 border border-white/10 flex items-center justify-center overflow-hidden">
               {user?.image ? (
-                <img src={user.image} alt={user?.name || "User"} className="w-full h-full object-cover" />
+                <Image src={user.image} alt={user?.name || "User"} className="w-full h-full object-cover" />
               ) : (
                 <User size={20} className="text-cyan-400" />
               )}

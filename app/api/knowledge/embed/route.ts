@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getPinecone } from '@/lib/pinecone';
 import { auth } from '@/lib/auth';
+import { generateSparseVector } from '@/lib/sparse-vector';
 
 export async function POST(req: NextRequest) {
   try {
@@ -33,7 +34,7 @@ export async function POST(req: NextRequest) {
 
     const pc = getPinecone();
 
-    // 2. Generate embedding using Pinecone Inference API (llama-text-embed-v2)
+    // 2. Generate DENSE embedding using Pinecone Inference API (llama-text-embed-v2)
     const embeddingResponse = await pc.inference.embed({
       model: 'llama-text-embed-v2',
       inputs: [text.trim()],
@@ -55,7 +56,13 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 3. Upsert into the Pinecone index
+    // 3. Generate SPARSE vector for hybrid keyword matching
+    //    This enables exact keyword searches (e.g. searching "Feras" matches
+    //    documents containing the name "Feras" even when the dense vector
+    //    might rank other "AI Engineers" higher due to semantic similarity).
+    const sparseValues = generateSparseVector(text.trim());
+
+    // 4. Upsert into the Pinecone index with BOTH dense + sparse vectors
     //    Namespace = 'public'  →  all users' knowledge is globally searchable
     //    userId is stored in metadata for Neon DB lookup after retrieval
     const index = pc.index(indexName);
@@ -65,9 +72,10 @@ export async function POST(req: NextRequest) {
       records: [
         {
           id,
-          values: vector,
+          values: vector,                     // Dense vector — semantic similarity
+          sparseValues,                        // Sparse vector — keyword matching (hybrid)
           metadata: {
-            userId,                          // Neon DB user.id — used to fetch full profile
+            userId,                            // Neon DB user.id — used to fetch full profile
             text: text.trim(),
             source: 'knowledge-upload',
             createdAt: new Date().toISOString(),

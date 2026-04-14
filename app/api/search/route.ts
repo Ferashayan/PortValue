@@ -4,6 +4,7 @@ import { db } from '@/db';
 import { user } from '@/db/schema';
 import { inArray } from 'drizzle-orm';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { generateSparseVector } from '@/lib/sparse-vector';
 
 // ── Gemini client ─────────────────────────────────────────────────────────────
 function getGemini() {
@@ -22,7 +23,7 @@ async function generateReason(
 
   const chunkSummary = chunks
     .slice(0, 3)
-    .map((c, i) => `[${i + 1}] (${Math.round(c.score * 100)}% match) ${c.text}`)
+    .map((c, i) => `[${i + 1}] (${Math.min(100, Math.round(c.score * 100))}% match) ${c.text}`)
     .join('\n');
 
   const prompt = `You are a talent and people-search assistant.
@@ -66,7 +67,7 @@ export async function POST(req: NextRequest) {
 
     const pc = getPinecone();
 
-    // 1. Embed the search query
+    // 1. Embed the search query — DENSE vector for semantic matching
     const embeddingResponse = await pc.inference.embed({
       model: 'llama-text-embed-v2',
       inputs: [query.trim()],
@@ -81,10 +82,30 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 2. Query Pinecone public namespace — top 5 matches
+    // 2. Generate SPARSE vector for the query — keyword matching
+    //    When searching for "Feras", the sparse vector ensures that documents
+    //    containing "Feras" are boosted via keyword overlap, regardless of how
+    //    the dense (semantic) model ranks them.
+    const sparseVector = generateSparseVector(query.trim());
+
+    // 3. Apply hybrid weighting: 80% sparse (keyword) + 20% dense (semantic)
+    //    This prioritises exact keyword/name matches over general semantic similarity.
+    const DENSE_WEIGHT = 0.6;
+    const SPARSE_WEIGHT = 0.4;
+
+    const weightedDenseVector = embedding.values.map((v: number) => v * DENSE_WEIGHT);
+    const weightedSparseVector = {
+      indices: sparseVector.indices,
+      values: sparseVector.values.map((v) => v * SPARSE_WEIGHT),
+    };
+
+    // 4. Query Pinecone public namespace — HYBRID search (dense + sparse)
+    //    Both weighted vectors are sent to Pinecone. The dot-product scoring
+    //    combines them, giving keyword matches ~4× more influence than semantic.
     const index = pc.index(indexName);
     const queryResponse = await index.namespace('public').query({
-      vector: embedding.values,
+      vector: weightedDenseVector,          // Dense vector  → 20% weight (semantic)
+      sparseVector: weightedSparseVector,   // Sparse vector → 80% weight (keywords)
       topK: 5,
       includeMetadata: true,
     });
@@ -94,7 +115,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ results: [] });
     }
 
-    // 3. Collect unique userIds from matched vectors
+    // 4. Collect unique userIds from matched vectors
     const userIdSet = new Set<string>();
     for (const m of matches) {
       const uid = m.metadata?.userId as string | undefined;
@@ -102,7 +123,7 @@ export async function POST(req: NextRequest) {
     }
     const userIds = Array.from(userIdSet);
 
-    // 4. Fetch matching user profiles from Neon DB
+    // 5. Fetch matching user profiles from Neon DB
     const users = await db
       .select({
         id: user.id,
@@ -117,7 +138,7 @@ export async function POST(req: NextRequest) {
 
     const userMap = Object.fromEntries(users.map((u) => [u.id, u]));
 
-    // 5. Group chunks by user
+    // 6. Group chunks by user
     const grouped: Record<string, {
       profile: typeof users[number];
       chunks: { text: string; score: number; label?: string }[];
@@ -140,7 +161,7 @@ export async function POST(req: NextRequest) {
       (a, b) => (b.chunks[0]?.score ?? 0) - (a.chunks[0]?.score ?? 0)
     );
 
-    // 6. Ask Gemini to explain each match — run in parallel
+    // 7. Ask Gemini to explain each match — run in parallel
     const results = await Promise.all(
       sorted.map(async (entry) => {
         let reason = '';

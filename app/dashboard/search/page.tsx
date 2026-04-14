@@ -10,9 +10,9 @@ export default function SearchPage() {
             Search
           </span>
         </h1>
-        <p className="text-on-surface-variant font-label text-[10px] tracking-widest uppercase opacity-70">
+        {/* <p className="text-on-surface-variant font-label text-[10px] tracking-widest uppercase opacity-70">
           Semantic search · Powered by Pinecone &amp; llama-text-embed-v2
-        </p>
+        </p> */}
       </header>
 
       <div className="flex-1 min-h-0">

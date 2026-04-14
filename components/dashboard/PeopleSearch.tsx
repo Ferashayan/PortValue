@@ -52,7 +52,7 @@ const Avatar = ({ src, name, size = 'md' }: { src?: string | null; name: string;
 };
 
 const ScoreBadge = ({ score }: { score: number }) => {
-  const pct = Math.round(score * 100);
+  const pct = Math.min(100, Math.round(score * 100));
   const color = pct >= 80 ? 'text-emerald-400 bg-emerald-400/10 border-emerald-400/20'
     : pct >= 55 ? 'text-amber-400 bg-amber-400/10 border-amber-400/20'
     : 'text-on-surface-variant bg-white/5 border-white/10';

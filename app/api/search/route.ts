@@ -82,11 +82,11 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 2. Generate SPARSE vector for the query — keyword matching
+    // 2. Generate SPARSE vector using Pinecone's pinecone-sparse-english-v0 model
     //    When searching for "Feras", the sparse vector ensures that documents
     //    containing "Feras" are boosted via keyword overlap, regardless of how
     //    the dense (semantic) model ranks them.
-    const sparseVector = generateSparseVector(query.trim());
+    const sparseVector = await generateSparseVector(query.trim(), 'query');
 
     // 3. Apply hybrid weighting: 80% sparse (keyword) + 20% dense (semantic)
     //    This prioritises exact keyword/name matches over general semantic similarity.

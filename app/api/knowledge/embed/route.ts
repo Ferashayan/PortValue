@@ -56,11 +56,11 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 3. Generate SPARSE vector for hybrid keyword matching
+    // 3. Generate SPARSE vector using Pinecone's pinecone-sparse-english-v0 model
     //    This enables exact keyword searches (e.g. searching "Feras" matches
     //    documents containing the name "Feras" even when the dense vector
     //    might rank other "AI Engineers" higher due to semantic similarity).
-    const sparseValues = generateSparseVector(text.trim());
+    const sparseValues = await generateSparseVector(text.trim(), 'passage');
 
     // 4. Upsert into the Pinecone index with BOTH dense + sparse vectors
     //    Namespace = 'public'  →  all users' knowledge is globally searchable

@@ -10,7 +10,11 @@ import {
 
 interface Chunk {
   text: string;
-  score: number;
+  denseScorePct: number;
+  sparseScorePct: number;
+  rerankScorePct: number;
+  finalScore: number;
+  finalScorePct: number;
   label?: string;
 }
 
@@ -26,6 +30,8 @@ interface Profile {
 interface SearchResult {
   profile: Profile;
   chunks: Chunk[];
+  finalScore: number;
+  finalScorePct: number;
   reason?: string;   // Gemini-generated match explanation
 }
 
@@ -51,8 +57,7 @@ const Avatar = ({ src, name, size = 'md' }: { src?: string | null; name: string;
   );
 };
 
-const ScoreBadge = ({ score }: { score: number }) => {
-  const pct = Math.min(100, Math.round(score * 100));
+const ScoreBadge = ({ pct }: { pct: number }) => {
   const color = pct >= 80 ? 'text-emerald-400 bg-emerald-400/10 border-emerald-400/20'
     : pct >= 55 ? 'text-amber-400 bg-amber-400/10 border-amber-400/20'
     : 'text-on-surface-variant bg-white/5 border-white/10';
@@ -63,10 +68,36 @@ const ScoreBadge = ({ score }: { score: number }) => {
   );
 };
 
+const LayerBadge = ({ label, pct, color }: { label: string; pct: number; color: string }) => (
+  <span className={`text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full border ${color}`}>
+    {label} {pct}%
+  </span>
+);
+
+const LayerBadges = ({ chunk }: { chunk: Chunk }) => (
+  <div className="flex items-center gap-1 flex-wrap">
+    <LayerBadge
+      label="Dense"
+      pct={chunk.denseScorePct}
+      color="text-blue-400 bg-blue-400/10 border-blue-400/20"
+    />
+    <LayerBadge
+      label="Sparse"
+      pct={chunk.sparseScorePct}
+      color="text-violet-400 bg-violet-400/10 border-violet-400/20"
+    />
+    <LayerBadge
+      label="Rerank"
+      pct={chunk.rerankScorePct}
+      color="text-amber-400 bg-amber-400/10 border-amber-400/20"
+    />
+  </div>
+);
+
 const ResultCard = ({ result }: { result: SearchResult }) => {
   const [expanded, setExpanded] = useState(false);
-  const { profile, chunks } = result;
-  const topScore = chunks[0]?.score ?? 0;
+  const { profile } = result;
+  const topScorePct = result.finalScorePct ?? 0;
 
   return (
     <div className="glass-panel rounded-2xl overflow-hidden border border-white/8 hover:border-tertiary/30 transition-all duration-300">
@@ -76,8 +107,14 @@ const ResultCard = ({ result }: { result: SearchResult }) => {
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <h3 className="font-bold text-on-surface text-sm">{profile.name}</h3>
-            <ScoreBadge score={topScore} />
+            <ScoreBadge pct={topScorePct} />
           </div>
+          {/* Per-layer badges for best chunk */}
+          {result.chunks[0] && (
+            <div className="mt-1">
+              <LayerBadges chunk={result.chunks[0]} />
+            </div>
+          )}
           <div className="flex items-center gap-1 mt-0.5">
             <Mail size={10} className="text-on-surface-variant" />
             <span className="text-[10px] text-on-surface-variant truncate">{profile.email}</span>
@@ -111,14 +148,14 @@ const ResultCard = ({ result }: { result: SearchResult }) => {
         >
           <span className="flex items-center gap-1.5">
             <BookOpen size={10} />
-            {chunks.length} knowledge {chunks.length === 1 ? 'chunk' : 'chunks'}
+            {result.chunks.length} knowledge {result.chunks.length === 1 ? 'chunk' : 'chunks'}
           </span>
           <ChevronDown size={11} className={`transition-transform duration-200 ${expanded ? 'rotate-180' : ''}`} />
         </button>
 
         {expanded && (
           <div className="px-4 pb-4 space-y-2">
-            {chunks.map((chunk, i) => (
+            {result.chunks.map((chunk, i) => (
               <div key={i} className="bg-white/4 rounded-xl p-3 border border-white/6">
                 <div className="flex items-center justify-between mb-1.5">
                   <div className="flex items-center gap-1.5">
@@ -127,7 +164,11 @@ const ResultCard = ({ result }: { result: SearchResult }) => {
                       {chunk.label ?? 'general'}
                     </span>
                   </div>
-                  <ScoreBadge score={chunk.score} />
+                  <ScoreBadge pct={chunk.finalScorePct} />
+                </div>
+                {/* Per-layer badges */}
+                <div className="mb-2">
+                  <LayerBadges chunk={chunk} />
                 </div>
                 <p className="text-xs text-on-surface/80 leading-relaxed">{chunk.text}</p>
               </div>
@@ -361,7 +402,7 @@ export const PeopleSearch = () => {
           </button>
         </div>
         <p className="text-[9px] text-on-surface-variant/30 text-center mt-2">
-          Enter ↵ to send · Shift+Enter for new line · Powered by Pinecone llama-text-embed-v2
+          Enter ↵ to send · Shift+Enter for new line · Triple-Hybrid · Dense + Sparse + BGE Rerank
         </p>
       </div>
     </div>

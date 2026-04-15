@@ -5,6 +5,9 @@ import { user } from '@/db/schema';
 import { inArray } from 'drizzle-orm';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { generateSparseVector } from '@/lib/sparse-vector';
+import { bgeRerank } from '@/lib/rerank';
+
+
 
 // ── Gemini client ─────────────────────────────────────────────────────────────
 function getGemini() {
@@ -17,13 +20,13 @@ function getGemini() {
 async function generateReason(
   query: string,
   profile: { name: string; bio: string | null },
-  chunks: { text: string; score: number }[]
+  chunks: { text: string; finalScorePct: number }[]
 ): Promise<string> {
   const model = getGemini();
 
   const chunkSummary = chunks
     .slice(0, 3)
-    .map((c, i) => `[${i + 1}] (${Math.min(100, Math.round(c.score * 100))}% match) ${c.text}`)
+    .map((c, i) => `[${i + 1}] (${c.finalScorePct}% match) ${c.text}`)
     .join('\n');
 
   const prompt = `You are a talent and people-search assistant.
@@ -45,7 +48,18 @@ Be direct and professional. Do not use bullet points. Write in English.`;
   return result.response.text().trim();
 }
 
-// ── Route handler ─────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+//  Triple-Hybrid Search Pipeline
+//
+//  Phase 1 — Parallel queries:
+//    a) Hybrid query   (dense×0.4 + sparse×0.3) → combined candidates
+//    b) Dense-only     (unweighted)             → per-doc semantic score
+//    c) Sparse-only    (unweighted)             → per-doc keyword score
+//  Phase 2 — BGE Rerank     → rerank score per doc
+//  Phase 3 — Weighted Sum   → FinalScore ∈ [0, 1.0]
+//  Phase 4 — Layer badges   → denseScorePct, sparseScorePct, rerankScorePct
+// ══════════════════════════════════════════════════════════════════════════════
+
 export async function POST(req: NextRequest) {
   try {
     const { query } = await req.json();
@@ -67,7 +81,8 @@ export async function POST(req: NextRequest) {
 
     const pc = getPinecone();
 
-    // 1. Embed the search query — DENSE vector for semantic matching
+    // ── Phase 1a: Generate embeddings ─────────────────────────────────────
+
     const embeddingResponse = await pc.inference.embed({
       model: 'llama-text-embed-v2',
       inputs: [query.trim()],
@@ -82,16 +97,13 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 2. Generate SPARSE vector using Pinecone's pinecone-sparse-english-v0 model
-    //    When searching for "Feras", the sparse vector ensures that documents
-    //    containing "Feras" are boosted via keyword overlap, regardless of how
-    //    the dense (semantic) model ranks them.
     const sparseVector = await generateSparseVector(query.trim(), 'query');
 
-    // 3. Apply hybrid weighting: 80% sparse (keyword) + 20% dense (semantic)
-    //    This prioritises exact keyword/name matches over general semantic similarity.
-    const DENSE_WEIGHT = 0.6;
-    const SPARSE_WEIGHT = 0.4;
+    // ── Phase 1b: Run 3 parallel Pinecone queries ─────────────────────────
+    //    This gives us individual per-layer scores without extra latency.
+
+    const DENSE_WEIGHT = 0.4;
+    const SPARSE_WEIGHT = 0.3;
 
     const weightedDenseVector = embedding.values.map((v: number) => v * DENSE_WEIGHT);
     const weightedSparseVector = {
@@ -99,31 +111,102 @@ export async function POST(req: NextRequest) {
       values: sparseVector.values.map((v) => v * SPARSE_WEIGHT),
     };
 
-    // 4. Query Pinecone public namespace — HYBRID search (dense + sparse)
-    //    Both weighted vectors are sent to Pinecone. The dot-product scoring
-    //    combines them, giving keyword matches ~4× more influence than semantic.
     const index = pc.index(indexName);
-    const queryResponse = await index.namespace('public').query({
-      vector: weightedDenseVector,          // Dense vector  → 20% weight (semantic)
-      sparseVector: weightedSparseVector,   // Sparse vector → 80% weight (keywords)
-      topK: 5,
-      includeMetadata: true,
-    });
+    const ns = index.namespace('public');
 
-    const matches = queryResponse.matches ?? [];
-    if (matches.length === 0) {
+    // Zero vector for sparse-only query (same dimension as dense)
+    const zeroDenseVector = new Array(embedding.values.length).fill(0);
+
+    const [hybridResponse, denseResponse, sparseResponse] = await Promise.all([
+      // 1. Hybrid query — weighted dense + sparse (the main search)
+      ns.query({
+        vector: weightedDenseVector,
+        sparseVector: weightedSparseVector,
+        topK: 15,
+        includeMetadata: true,
+      }),
+      // 2. Dense-only query — unweighted, pure semantic similarity
+      ns.query({
+        vector: embedding.values as number[],
+        topK: 15,
+        includeMetadata: false,
+      }),
+      // 3. Sparse-only query — pure keyword match score
+      ns.query({
+        vector: zeroDenseVector,
+        sparseVector: {
+          indices: sparseVector.indices,
+          values: sparseVector.values,
+        },
+        topK: 15,
+        includeMetadata: false,
+      }),
+    ]);
+
+    const rawMatches = hybridResponse.matches ?? [];
+    if (rawMatches.length === 0) {
       return NextResponse.json({ results: [] });
     }
 
-    // 4. Collect unique userIds from matched vectors
+    // ── Build per-layer score lookup maps ──────────────────────────────────
+    //    Dot-product scores can be slightly negative for weak-but-valid matches.
+    //    Instead of hard-clamping to 0 (which erases those signals), we min-max
+    //    normalise each layer's scores so the full observed range maps to [0, 1].
+
+    const denseMatches = denseResponse.matches ?? [];
+    const sparseMatches = sparseResponse.matches ?? [];
+
+    function minMaxNormalise(matches: { id: string; score?: number }[]): Map<string, number> {
+      const map = new Map<string, number>();
+      if (matches.length === 0) return map;
+
+      const scores = matches.map((m) => m.score ?? 0);
+      const min = Math.min(...scores);
+      const max = Math.max(...scores);
+      const range = max - min;
+
+      for (const m of matches) {
+        const raw = m.score ?? 0;
+        // If all scores identical → 1.0; otherwise scale [min, max] → [0, 1]
+        const normalised = range > 0 ? (raw - min) / range : 1.0;
+        map.set(m.id, normalised);
+      }
+      return map;
+    }
+
+    const denseScoreMap = minMaxNormalise(denseMatches);
+    const sparseScoreMap = minMaxNormalise(sparseMatches);
+
+    // ── Phase 2 + 3: BGE Rerank → Weighted Sum → Final Sort ──────────────
+
+    const reranked = await bgeRerank(
+      query.trim(),
+      rawMatches
+        .filter((m) => m.metadata?.text)
+        .map((m) => ({
+          id: m.id,
+          text: m.metadata!.text as string,
+          hybridScore: Math.min(Math.max(m.score ?? 0, 0), 0.7),
+          metadata: m.metadata as Record<string, unknown>,
+        })),
+      10
+    );
+
+    if (reranked.length === 0) {
+      return NextResponse.json({ results: [] });
+    }
+
+    // ── Collect unique userIds ────────────────────────────────────────────
+
     const userIdSet = new Set<string>();
-    for (const m of matches) {
-      const uid = m.metadata?.userId as string | undefined;
+    for (const r of reranked) {
+      const uid = r.metadata?.userId as string | undefined;
       if (uid) userIdSet.add(uid);
     }
     const userIds = Array.from(userIdSet);
 
-    // 5. Fetch matching user profiles from Neon DB
+    // ── Fetch profiles from Neon DB ──────────────────────────────────────
+
     const users = await db
       .select({
         id: user.id,
@@ -138,30 +221,64 @@ export async function POST(req: NextRequest) {
 
     const userMap = Object.fromEntries(users.map((u) => [u.id, u]));
 
-    // 6. Group chunks by user
+    // ── Group chunks by user with per-layer scores ───────────────────────
+
     const grouped: Record<string, {
       profile: typeof users[number];
-      chunks: { text: string; score: number; label?: string }[];
+      finalScore: number;
+      finalScorePct: number;
+      chunks: {
+        text: string;
+        // Per-layer percentages
+        denseScorePct: number;
+        sparseScorePct: number;
+        rerankScorePct: number;
+        // Combined
+        finalScore: number;
+        finalScorePct: number;
+        label?: string;
+      }[];
     }> = {};
 
-    for (const match of matches) {
-      const uid = match.metadata?.userId as string | undefined;
+    for (const r of reranked) {
+      const uid = r.metadata?.userId as string | undefined;
       if (!uid || !userMap[uid]) continue;
       if (!grouped[uid]) {
-        grouped[uid] = { profile: userMap[uid], chunks: [] };
+        grouped[uid] = {
+          profile: userMap[uid],
+          finalScore: r.finalScore,
+          finalScorePct: r.finalScorePct,
+          chunks: [],
+        };
       }
+
+      // Look up individual layer scores for this chunk
+      const denseScore = denseScoreMap.get(r.id) ?? 0;
+      const sparseScore = sparseScoreMap.get(r.id) ?? 0;
+
       grouped[uid].chunks.push({
-        text: match.metadata?.text as string,
-        score: match.score ?? 0,
-        label: match.metadata?.label as string | undefined,
+        text: r.text,
+        denseScorePct: Math.round(denseScore * 100),
+        sparseScorePct: Math.round(sparseScore * 100),
+        rerankScorePct: Math.round(r.rerankScore * 100),
+        finalScore: r.finalScore,
+        finalScorePct: r.finalScorePct,
+        label: r.metadata?.label as string | undefined,
       });
+      // Update group-level score to best chunk
+      if (r.finalScore > grouped[uid].finalScore) {
+        grouped[uid].finalScore = r.finalScore;
+        grouped[uid].finalScorePct = r.finalScorePct;
+      }
     }
 
+    // Sort groups by best finalScore descending
     const sorted = Object.values(grouped).sort(
-      (a, b) => (b.chunks[0]?.score ?? 0) - (a.chunks[0]?.score ?? 0)
+      (a, b) => b.finalScore - a.finalScore
     );
 
-    // 7. Ask Gemini to explain each match — run in parallel
+    // ── Generate Gemini explanations in parallel ─────────────────────────
+
     const results = await Promise.all(
       sorted.map(async (entry) => {
         let reason = '';

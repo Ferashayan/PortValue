@@ -1,7 +1,7 @@
 "use client"; // الحارس الذي يحمي الكود من الانهيار في Next.js
 
 import React from 'react';
-import { LayoutDashboard, Database, FlaskConical, Settings, HelpCircle, LogOut, Plus } from 'lucide-react';
+import { LayoutDashboard, Database, FlaskConical, Settings, HelpCircle, LogOut, Plus, Search } from 'lucide-react';
 import { usePathname } from 'next/navigation';
 import Link from 'next/link';
 
@@ -13,6 +13,8 @@ export const Sidebar = () => {
     { icon: <Database size={20} />, label: "Knowledge", href: "/dashboard/knowledge" },
     { icon: <FlaskConical size={20} />, label: "Playground", href: "/dashboard/playground" },
     { icon: <Settings size={20} />, label: "Settings", href: "/dashboard/agent-setting" },
+    { icon: <Search size={20} />, label: "Search", href: "/dashboard/search" }
+
   ];
 
   return (
